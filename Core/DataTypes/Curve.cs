@@ -168,6 +168,7 @@ public sealed class Curve : IEditableInputType
         key.U = u;
         _state.Table[u] = key;
         SplineInterpolator.UpdateTangents(_state.Table.ToList());
+        ChangeCount++;
     }
 
     public void RemoveKeyframeAt(double u)
@@ -176,6 +177,7 @@ public sealed class Curve : IEditableInputType
         var state = _state;
         state.Table.Remove(u);
         SplineInterpolator.UpdateTangents(state.Table.ToList());
+        ChangeCount++;
     }
 
     public void UpdateTangents()
@@ -208,6 +210,7 @@ public sealed class Curve : IEditableInputType
         state.Table[newU] = key;
         key.U = newU;
         SplineInterpolator.UpdateTangents(state.Table.ToList());
+        ChangeCount++;
     }
     
     // Returns null if there is no vDefinition at that position
@@ -302,7 +305,9 @@ public sealed class Curve : IEditableInputType
             var key = curves[index].GetV(time) ?? new VDefinition { U = time };
             key.Value = values[index];
             curves[index].AddOrUpdateV(time, key);
+            curves[index].ChangeCount++;
         }
+        
     }
 
     public static void UpdateCurveValues(Curve[] curves, double time, int[] values)
@@ -319,6 +324,9 @@ public sealed class Curve : IEditableInputType
                                                       };
             key.Value = values[index];
             curves[index].AddOrUpdateV(time, key);
+            curves[index].ChangeCount++;
         }
     }
+    
+    public int ChangeCount { get; private set; }
 }
