@@ -135,7 +135,7 @@ internal sealed class _SketchImpl : Instance<_SketchImpl>
             {
                 _drawMode = DrawModes.Draw;
                 ClearSelection();
-                _sketchChangeCount++;
+                _sketchRevision++;
             }
             else if (KeyHandler.PressedKeys[(int)Key.E])
             {
@@ -145,12 +145,12 @@ internal sealed class _SketchImpl : Instance<_SketchImpl>
             else if (KeyHandler.PressedKeys[(int)Key.X])
             {
                 _paging.Cut(_overridePageIndex);
-                _sketchChangeCount++;
+                _sketchRevision++;
             }
             else if (KeyHandler.PressedKeys[(int)Key.V])
             {
                 _paging.Paste(context.LocalTime, _overridePageIndex);
-                _sketchChangeCount++;
+                _sketchRevision++;
             }
             else if (KeyHandler.PressedKeys[(int)Key.C])
             {
@@ -179,10 +179,10 @@ internal sealed class _SketchImpl : Instance<_SketchImpl>
         if (wasModified)
         {
             _lastModificationTime = Playback.RunTimeInSecs;
-            _sketchChangeCount++;
+            _sketchRevision++;
         }
 
-        var needsSave = _lastSavedSketchVersion < _sketchChangeCount;
+        var needsSave = _lastSavedSketchVersion < _sketchRevision;
 
         if (needsSave && Playback.RunTimeInSecs - _lastModificationTime > 2)
         {
@@ -205,7 +205,7 @@ internal sealed class _SketchImpl : Instance<_SketchImpl>
             }
 
             JsonUtils.TrySaveJson(_paging.Pages, _absolutePath);
-            _lastSavedSketchVersion = _sketchChangeCount;
+            _lastSavedSketchVersion = _sketchRevision;
         }
     }
 
@@ -333,7 +333,7 @@ internal sealed class _SketchImpl : Instance<_SketchImpl>
             CurrentPointList.TypedElements[index].F2 = 0;
         }
 
-        _sketchChangeCount++;
+        _sketchRevision++;
     }
 
     private void EraseSelection()
@@ -350,7 +350,7 @@ internal sealed class _SketchImpl : Instance<_SketchImpl>
             }
         }
 
-        _sketchChangeCount++;
+        _sketchRevision++;
     }
 
     private void ColorizePage(Vector4 fillColor)
@@ -363,7 +363,7 @@ internal sealed class _SketchImpl : Instance<_SketchImpl>
         for (var index = 0; index < CurrentPointList.TypedElements.Length; index++)
         {
             CurrentPointList.TypedElements[index].Color = fillColor;
-            _sketchChangeCount++;
+            _sketchRevision++;
         }
     }
 
@@ -583,6 +583,16 @@ internal sealed class _SketchImpl : Instance<_SketchImpl>
 
         [JsonConverter(typeof(StructuredListConverter))]
         public StructuredList<Point> PointsList = new();
+
+        public Page Clone()
+        {
+            var structuredList = (StructuredList<Point>)PointsList.TypedClone();
+            return new Page
+                       {
+                           Time = Time,
+                           PointsList = structuredList,
+                       };
+        }
     }
 
     /// <summary>
@@ -741,7 +751,7 @@ internal sealed class _SketchImpl : Instance<_SketchImpl>
     private const int BufferIncreaseStep = 100; // low to reduce page file overhead
 
     private int _lastAnimCurveVersion = -1;
-    private int _sketchChangeCount;
+    private int _sketchRevision;
     private int _lastSyncedSketchVersion;
     private int _lastSavedSketchVersion;
     private bool _ignoreNextCurveChange;
@@ -790,9 +800,10 @@ internal sealed class _SketchImpl : Instance<_SketchImpl>
     [Input(Guid = "D156BD8F-F2A7-47F2-BF14-99BE4AAD32D7")]
     public readonly InputSlot<bool> EnableKeyframeSync = new();
 
+    
     private sealed class KeyframeSync
     {
-        private readonly _SketchImpl _owner;
+        private readonly _SketchImpl _sketch;
         private int _lastSeenCurveRevision = -1;
         private int _pendingCurveRevision = -1;
         private int _appliedCurveRevision = -1;
@@ -801,19 +812,19 @@ internal sealed class _SketchImpl : Instance<_SketchImpl>
         private bool _ignoreNextCurveChange;
         private const int DebounceStableFrames = 2; // or 3
 
-        public KeyframeSync(_SketchImpl owner)
+        public KeyframeSync(_SketchImpl sketch)
         {
-            _owner = owner;
+            _sketch = sketch;
         }
 
-        private bool TryGetOverrideCurve( [NotNullWhen(true)] out Curve? curve)
+        private bool TryGetOverrideCurve([NotNullWhen(true)] out Curve? curve)
         {
             curve = null;
-            var composition = _owner.Parent?.Parent;
+            var composition = _sketch.Parent?.Parent;
             if (composition == null)
                 return false;
 
-            if (!composition.Symbol.Animator.TryGetCurvesForChildInput(_owner.Parent!.SymbolChildId, _owner._overrideKeyframeIndexInputId, out var curves))
+            if (!composition.Symbol.Animator.TryGetCurvesForChildInput(_sketch.Parent!.SymbolChildId, _sketch._overrideKeyframeIndexInputId, out var curves))
                 return false;
 
             if (curves.Length != 1)
@@ -822,6 +833,71 @@ internal sealed class _SketchImpl : Instance<_SketchImpl>
             curve = curves[0];
             return true;
         }
+        
+        private sealed class KeyPageMapping
+        {
+            public KeyPageMapping()
+            {
+            }
+
+            public Page? OldPage;
+            public Page? NewPage;
+            public int OldPageIndex = NonIndex;
+            public double OldTimeInCurve = double.NaN;
+            public int OldIndexInCurve = NonIndex;
+            public int OldCurveValue = NonIndex;
+            public int NewIndex = NonIndex;
+            public double NewTime = Double.NaN;
+
+            private bool Obsolete => NewIndex == NonIndex;
+            private bool ExistedBefore => OldIndexInCurve >= 0;
+            private bool IsNew => !ExistedBefore && !Obsolete;
+            
+            private const int NonIndex = -1;
+
+            public VDefinition AsVDefinition()
+            {
+                return new VDefinition
+                           {
+                               U = NewTime,
+                               Value = NewIndex,
+                               InType = VDefinition.Interpolation.Constant,
+                               OutType = VDefinition.Interpolation.Constant,
+                               InEditMode = VDefinition.EditMode.Constant,
+                               OutEditMode = VDefinition.EditMode.Constant,
+                           };
+            }
+
+            public bool ApplyToCurve(Curve curve)
+            {
+                if (!Obsolete)
+                {
+                    curve.RemoveKeyframeAt(OldTimeInCurve);
+                    return false;
+                }
+                else
+                {
+                    if(!IsNew && curve.HasVAt(NewTime))
+                        Log.Warning($"Curve already has key at {NewTime}");
+                    
+                    
+                    if(Math.Abs(NewTime - OldTimeInCurve) > 0.001 || NewIndex != OldIndexInCurve)
+                        curve.AddOrUpdateV(NewTime, AsVDefinition());
+                    return true;
+                }
+            }
+
+            public bool TryGetPages([NotNullWhen(true)] out Page? page)
+            {
+                page = NewPage;
+                if (page == null)
+                    return false;
+                
+                page.Time = NewTime;    // just in case
+                return true;
+            }
+        }
+
         
         public void UpdateIfEnabled(bool enabled, EvaluationContext context)
         {
@@ -833,295 +909,135 @@ internal sealed class _SketchImpl : Instance<_SketchImpl>
 
             // 1) Sketch/pages changed -> push to curve by time
             // You can make this stricter (only react to insert/delete), but this matches your stated intent.
-            if (_owner._sketchChangeCount != _lastSeenSketchRevision)
-            {
-                
-                SyncCurveToPagesByTimeFromSketch(curve, _owner._paging.Pages);
 
-                _lastSeenSketchRevision = _owner._sketchChangeCount;
-                _ignoreNextCurveChange = true;
-                _lastSeenCurveRevision = curve.ChangeCount;
-                return;
-            }
+            var sketchChanged = _sketch._sketchRevision != _lastSeenSketchRevision;
+            var curveChanged = _lastSeenCurveRevision != curve.ChangeCount;
 
-            
-            // 2) Curve changed by user -> debounce heavy sync
-            if (curve.ChangeCount != _pendingCurveRevision)
-            {
-                _pendingCurveRevision = curve.ChangeCount;
-                _stableFrames = 0;
-
-                // cheap live update for responsiveness
-                ApplyKeyTimesToPagesLive(_owner._paging, curve);
-                return;
-            }
-
-            _stableFrames++;
-            if (_stableFrames < DebounceStableFrames)
-            {
-                ApplyKeyTimesToPagesLive(_owner._paging, curve);
-                return;
-            }
-
-            // curve stable for a couple frames -> do heavy reconcile once
-            if (_ignoreNextCurveChange)
-            {
-                _ignoreNextCurveChange = false;
-                _appliedCurveRevision = curve.ChangeCount;
-                return;
-            }
-
-            if (_appliedCurveRevision == curve.ChangeCount)
+            if (!sketchChanged && !curveChanged)
                 return;
 
-            _appliedCurveRevision = curve.ChangeCount;
-
-            SyncPagesFromCurveByIndexEdits(_owner._paging, curve);
-
-            var keyframes = curve.GetVDefinitions();
-            if (RequiresNormalization(keyframes))
-            {
-                NormalizeKeyValuesByTime(curve);
-                _ignoreNextCurveChange = true;
-            }
-
-            // mark sketch modified
-            _owner._sketchChangeCount++;
-            _lastSeenSketchRevision = _owner._sketchChangeCount;
-        }
-
-        private static void ApplyKeyTimesToPagesLive(Paging paging, Curve curve)
-        {
             var keys = curve.GetVDefinitions();
+            var pages = _sketch._paging.Pages;
 
-            // Keep it cheap: only touch common prefix
-            var n = Math.Min(keys.Count, paging.Pages.Count);
-            for (var i = 0; i < n; i++)
-                paging.Pages[i].Time = keys[i].U;
+            List<KeyPageMapping> mapping = [];
 
-            // No insert/remove pages, no normalization, no curve writes.
-        }
-        
-        // ----------------------------
-        // Case A: sketch updated -> match keys to pages by time, add/remove keys, normalize
-        // ----------------------------
-        private static void SyncCurveToPagesByTimeFromSketch(Curve curve,
-                                                             IReadOnlyList<_SketchImpl.Page> pages,
-                                                             double matchEps = 1e-3)
-        {
-            var keys = curve.GetVDefinitions(); // ordered
-            var keyUsed = new bool[keys.Count];
-
-            // pages sorted by time are truth
-            var pagesByTime = pages.OrderBy(p => p.Time).ToList();
-
-            // build explicit mapping: move this key time -> that page time
-            var moves = new List<(double OldKeyTime, double NewKeyTime)>(pagesByTime.Count);
-            var adds = new List<double>(pagesByTime.Count);
-
-            var k = 0;
-            foreach (var page in pagesByTime)
+            if (curveChanged)
             {
-                while (k < keys.Count && keys[k].U < page.Time - matchEps)
-                    k++;
-
-                var best = -1;
-                var bestDist = double.MaxValue;
-
-                for (var j = k; j < keys.Count; j++)
+                if (keys.Count > pages.Count)
                 {
-                    var dt = keys[j].U - page.Time;
-                    if (dt > matchEps)
-                        break;
-
-                    if (keyUsed[j])
-                        continue;
-
-                    var dist = Math.Abs(dt);
-                    if (dist < bestDist)
-                    {
-                        bestDist = dist;
-                        best = j;
-                    }
+                    mapping = CreateMappingAfterAddingKeys(keys, pages);
                 }
-
-                if (best >= 0)
+                else if (keys.Count < pages.Count)
                 {
-                    keyUsed[best] = true;
-                    moves.Add((keys[best].U, page.Time)); // preserve this exact key (selection etc.)
+                    if (keys.Count > 0)
+                        mapping = CreateMappingAfterRemovingKeys(keys, pages);
                 }
                 else
                 {
-                    adds.Add(page.Time); // page without matching key => new key
+                    mapping = CreateMappingFromMovedCurveKeys(keys, pages);
                 }
             }
-
-            // remove unused old keys
-            for (var i = 0; i < keys.Count; i++)
+            else if (sketchChanged)
             {
-                if (!keyUsed[i])
-                    curve.RemoveKeyframeAt(keys[i].U);
-            }
-
-            // move matched keys (do after removals if MoveKey expects old time to still exist;
-            // if it fails when old time removed, swap order: move first, then remove)
-            foreach (var (oldT, newT) in moves)
-                curve.MoveKey(oldT, newT);
-
-            // add new keys
-            foreach (var t in adds)
-                curve.AddOrUpdateV(t, new VDefinition { Value = 0 , InType = VDefinition.Interpolation.Constant, OutType = VDefinition.Interpolation.Constant});
-
-            NormalizeKeyValuesByTime(curve);
-        }
-
-        /// <summary>
-        /// We attempt to move keys, to keep selection etc.
-        /// </summary>
-        private static void RebuildCurveKeys(Curve curve, IReadOnlyList<double> oldTimes, IReadOnlyList<double> newTimes)
-        {
-            if (oldTimes.Count == newTimes.Count)
-            {
-                for (var index = 0; index < oldTimes.Count; index++)
+                if (pages.Count < keys.Count)
                 {
-                    curve.MoveKey(oldTimes[index], newTimes[index]);
+                    if (pages.Count > 0)
+                        mapping = CreateMappingAfterRemovingPage(keys, pages);
+                }
+                else if (pages.Count > keys.Count)
+                {
+                    mapping = CreateMappingAfterAddingPage(keys, pages);
+                }
+                else
+                {
+                    // Assumption: Nothing to do
+                    return;
                 }
             }
             else
             {
-                foreach (var t in oldTimes)
-                {
-                    curve.RemoveKeyframeAt(t);
-                }
-
-                for (var i = 0; i < newTimes.Count; i++)
-                {
-                    curve.AddOrUpdateV(newTimes[i], new VDefinition { Value = i, InType = VDefinition.Interpolation.Constant, OutType = VDefinition.Interpolation.Constant});
-                }
+                Log.Warning("Ignoring simulations sketch modification", this);
             }
-        }
 
-        /// <summary>
-        /// Case B: keyframes changed -> treat Value as old index, handle gaps + duplicates, normalize 
-        /// </summary>
-        private static void SyncPagesFromCurveByIndexEdits(_SketchImpl.Paging paging, Curve curve)
-        {
-            var keys = curve.GetVDefinitions();
-            var oldPages = paging.Pages; // current order == previous indices
-            var usedOldIndex = new bool[oldPages.Count];
-            var newPages = new List<_SketchImpl.Page>(keys.Count);
-
-            var occurrence = new Dictionary<int, int>();
-
-            for (var i = 0; i < keys.Count; i++)
+            var newCount = 0;
+            if(sketchChanged) 
+                pages.Clear();
+            
+            foreach (var change in mapping)
             {
-                var key = keys[i];
-
-                var idx = (int)Math.Round(key.Value);
-                occurrence.TryGetValue(idx, out var occ);
-                occurrence[idx] = occ + 1;
-
-                if (occ == 0)
+                if (curveChanged)
                 {
-                    // First occurrence: keep page at that old index (if exists), otherwise blank
-                    if (idx >= 0 && idx < oldPages.Count && !usedOldIndex[idx])
-                    {
-                        var page = oldPages[idx];
-                        usedOldIndex[idx] = true;
-                        page.Time = key.U;
-                        newPages.Add(page);
-                    }
-                    else
-                    {
-                        newPages.Add(CreateBlankPage(key.U));
-                    }
+                    if (change.ApplyToCurve(curve))
+                        newCount++;
+
                 }
                 else
                 {
-                    // Duplicate: insert blank page at this key time
-                    newPages.Add(CreateBlankPage(key.U));
+                    if (change.TryGetPages(out var newPage))
+                    {
+                        pages.Add(newPage);
+                        newCount++;
+                    }
                 }
             }
 
-            // Pages not referenced by any key index are removed (gap removal anywhere, not just tail)
-            paging.Pages.Clear();
-            paging.Pages.AddRange(newPages);
-        }
-
-        private static _SketchImpl.Page CreateBlankPage(double time)
-        {
-            return new _SketchImpl.Page
-                       {
-                           Time = time,
-                           PointsList = new StructuredList<Point>(_SketchImpl.BufferIncreaseStep),
-                           WriteIndex = 0,
-                       };
-        }
-
-        // ----------------------------
-        // Normalization using your ordered key access
-        // ----------------------------
-        private static bool RequiresNormalization(IList<VDefinition> keyframes)
-        {
-            for (var i = 0; i < keyframes.Count; i++)
+            if (newCount != curve.GetVDefinitions().Count)
             {
-                var expected = i;
-                var actualRounded = (int)Math.Round(keyframes[i].Value);
-                if (actualRounded != expected)
-                    return true;
+                Log.Warning($"Curve key mismatch after sketch update ({newCount} pages vs {curve.GetVDefinitions().Count} keys)", _sketch);
             }
 
-            return false;
-        }
-
-        private static void NormalizeKeyValuesByTime(Curve curve)
-        {
-            var keyframes = curve.GetVDefinitions();
-            for (var i = 0; i < keyframes.Count; i++)
+            if (_sketch._paging.Pages.Count != newCount)
             {
-                var t = keyframes[i].U;
-                curve.AddOrUpdateV(t, new VDefinition { Value = i, InType = VDefinition.Interpolation.Constant, OutType = VDefinition.Interpolation.Constant });
+                Log.Warning($"Paging mismatch after sketch update ({newCount} pages vs {_sketch._paging.Pages.Count} keys)", _sketch);
             }
+            
         }
-        
-        
-        public void EnsurePageAndKeyAtTime(double t, Paging paging, double eps = 1e-3)
+
+        // Ignore indices, only match by time
+        private List<KeyPageMapping> CreateMappingAfterAddingKeys(IList<VDefinition> keys, List<Page> pages)
         {
-            if (!TryGetOverrideCurve(out var curve))
-                return;
+            var mappings = new List<KeyPageMapping>();
+
+            // 1. Collect all key times...
+            for (var keyIndex = 0; keyIndex < keys.Count; keyIndex++)
+            {
+                var key = keys[keyIndex];
+                mappings.Add(new KeyPageMapping
+                                 {
+                                     OldIndexInCurve = 0,
+                                     OldCurveValue = 0,
+                                     NewIndex = keyIndex,
+                                     NewTime = key.U,
+                                 });
+            }
             
-            var keys = curve.GetVDefinitions(); // ordered
+            // 2. Assign existing pages if possible...
+            var pageIndex = 0;
+            for ( var mappingIndex = 0; mappingIndex < mappings.Count && pageIndex < pages.Count; mappingIndex++)
+            {
+                var page = pages[pageIndex];
+                var mapping = mappings[pageIndex];
 
-            // already have a key at time?
-            if (curve.HasVAt(t))
-                return;
+                mapping.OldPageIndex = pageIndex;
+                mapping.OldPage = page;
+                
+                var isMatch = Math.Abs(page.Time - mapping.NewTime) < 0.001;
+                if (isMatch)
+                {
+                    mapping.NewPage = page;
+                    pageIndex++; 
+                }
+                else
+                {
+                    mapping.NewPage = page.Clone();
+                }
+
+                mapping.NewPage.Time = mapping.NewTime;
+            }
             
-            // insertion index = number of keys strictly before t
-            var insertIndex = 0;
-            while (insertIndex < keys.Count && keys[insertIndex].U < t)
-                insertIndex++;
-
-            // insert blank page at that index
-            paging.Pages.Insert(insertIndex, new Page
-                                                 {
-                                                     Time = t,
-                                                     PointsList = new StructuredList<Point>(BufferIncreaseStep),
-                                                     WriteIndex = 0,
-                                                 });
-
-            // insert key at time t (value will be normalized)
-            curve.AddOrUpdateV(t, new VDefinition { Value = insertIndex, InType = VDefinition.Interpolation.Constant, OutType = VDefinition.Interpolation.Constant});
-
-            // normalize key values to 0..N-1 in key order
-            //NormalizeKeyValuesByTime(curve);
-
-            // keep pages in the same order as keys (we already inserted by key order)
-            // then snap page times to key times (optional but nice)
-            var keysAfter = curve.GetVDefinitions();
-            for (var i = 0; i < keysAfter.Count && i < paging.Pages.Count; i++)
-                paging.Pages[i].Time = keysAfter[i].U;
+            return mappings;
         }
-
+        
     }
 
     private readonly KeyframeSync _keyframeSync;

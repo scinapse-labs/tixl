@@ -212,6 +212,20 @@ public sealed class Curve : IEditableInputType
         SplineInterpolator.UpdateTangents(state.Table.ToList());
         ChangeCount++;
     }
+
+
+    public bool TryGetKey(double u, [NotNullWhen(true)] out VDefinition? vDefinition)
+    {
+        u = Math.Round(u, TimePrecision);
+        if (!_state.Table.TryGetValue(u, out var key))
+        {
+            vDefinition = null;
+            return false;
+        }
+
+        vDefinition = key.Clone();
+        return true;
+    }
     
     // Returns null if there is no vDefinition at that position
     public VDefinition? GetV(double u)
