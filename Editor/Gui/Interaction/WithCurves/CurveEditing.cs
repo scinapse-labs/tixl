@@ -284,11 +284,23 @@ internal abstract class CurveEditing
         }
         
         var cmd = new ChangeKeyframesCommand(selectedOrAllPoints, GetAllCurves());
-
-        for (var index = 1; index < selectedOrAllPoints.Count-1; index++)
+        
+        var groups = selectedOrAllPoints
+                    .GroupBy(k => k.U)
+                    .OrderBy(g => g.Key)
+                    .ToList();
+        
+        for (var i = 0; i < groups.Count; i++)
         {
-            var f = index / (double)(selectedOrAllPoints.Count - 1);
-            selectedOrAllPoints[index].U = MathUtils.Lerp(startTime, endTime, f);
+            var g = groups[i];
+            var f = groups.Count > 1
+                        ? i / (double)(groups.Count - 1)
+                        : 0.0;
+            
+            foreach (var key in g)
+            {
+                key.U = MathUtils.Lerp(startTime, endTime, f);
+            } 
         }
 
         cmd.StoreCurrentValues();
